@@ -1,0 +1,168 @@
+-- SpawnService.lua
+local Workspace = game:GetService("Workspace")
+local LocationData = require(script.PlantLocation)
+local PlantData = require(script.PlantData)
+local PlantInstance = require(script.PlantInstance)
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+
+local MAX_HEIGHT_DELTA = 20      -- studs
+local MAX_ATTEMPTS = 25          -- prevents infinite loops
+local RAY_HEIGHT = 30           -- how high we raycast from
+local SpawnService = {}
+
+SpawnService.Active = {}
+
+local function getCount(location)
+	local count = 0
+	for _ in pairs(SpawnService.Active[location]) do
+		count += 1
+	end
+	return count
+end
+
+local function randomPosition(area, plant)
+	for attempt = 1, MAX_ATTEMPTS do
+		-- 1. Pick random XZ
+		local angle = math.random() * math.pi * 2
+		local radius = math.sqrt(
+			math.random() * (area.Range^2 - area.MinRange^2) + area.MinRange^2
+		)
+
+		local x = area.Center.X + math.cos(angle) * radius
+		local z = area.Center.Z + math.sin(angle) * radius
+
+		-- 2. Raycast down
+		local rayOrigin = Vector3.new(x, area.Center.Y + RAY_HEIGHT, z)
+		local rayDirection = Vector3.new(0, -RAY_HEIGHT * 2, 0)
+
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		params.FilterDescendantsInstances = { workspace.Spawns, workspace.SpawnIgnoreRaycast }
+
+		local result = workspace:Raycast(rayOrigin, rayDirection, params)
+
+		if result then
+			local groundY = result.Position.Y
+			local heightDelta = math.abs(groundY - area.Center.Y)
+
+			-- 3. Reject steep / high areas
+			if heightDelta <= MAX_HEIGHT_DELTA then
+				return Vector3.new(
+					x,
+					groundY + plant.Model.Main.Size.Y / 2,
+					z
+				)
+			end
+		end
+	end
+
+	-- 4. Fallback (safe)
+	warn("Failed to find valid spawn position")
+	return area.Center
+end
+
+local function pickPlant(location)
+	local roll = math.random()
+	if roll <= location.Chances.Boss and #location.SpawnTable.Boss > 0 then
+		return location.SpawnTable.Boss[math.random(#location.SpawnTable.Boss)]
+	end
+	if roll <= location.Chances.Rare and #location.SpawnTable.Rare > 0 then
+		return location.SpawnTable.Rare[math.random(#location.SpawnTable.Rare)]
+	end
+	return location.SpawnTable.Default[math.random(#location.SpawnTable.Default)]
+end
+
+function SpawnService:CreateSpawn(locationName)
+	local location = LocationData[locationName]
+	if not location then return end
+	SpawnService.Active[locationName] = SpawnService.Active[locationName] or {}
+
+	if getCount(locationName) >= location.MaxSpawns then
+		return
+	end
+	
+	local plantName = pickPlant(location)
+
+	local plant = PlantInstance.new(plantName, locationName)
+	if plant then
+		local pos = randomPosition(location.SpawnArea, plant)
+		plant.Model:SetPrimaryPartCFrame(CFrame.new(pos))
+		SpawnService.Active[locationName][plant.Id] = plant
+	end
+end
+
+function SpawnService:RemoveSpawn(plant)
+	if not plant or plant._destroying then return end
+	plant._destroying = true
+
+	local locationName = plant.Location
+	local plantModel = plant.Model
+
+	if plantModel then
+		for _, obj in ipairs(plantModel:GetDescendants()) do
+			if obj:IsA("BasePart") then
+				obj.CanCollide = false
+				TweenService:Create(obj, TweenInfo.new(2), {Transparency = 1}):Play()
+			end
+		end
+	end
+
+	task.wait(2)
+
+	-- Remove authoritative reference FIRST
+	local locationTable = SpawnService.Active[locationName]
+	if locationTable then
+		locationTable[plant.Id] = nil
+	end
+
+	-- Clean internals
+	plant:Destroy()
+
+	-- Respawn
+	local respawn = LocationData[locationName].RespawnRate
+	task.delay(math.random(respawn[1], respawn[2]), function()
+		SpawnService:CreateSpawn(locationName)
+	end)
+end
+
+function SpawnService:Initialize(locationName)
+	SpawnService.Active[locationName] = {}
+
+	local max = LocationData[locationName].MaxSpawns
+	for i = 1, max do
+		SpawnService:CreateSpawn(locationName)
+	end
+end
+
+function SpawnService:InitializeAll()
+	for k, v in pairs(LocationData) do
+		local locationName = k
+		SpawnService:Initialize(k)
+		task.wait()
+	end
+end
+
+function SpawnService:GetPlant(locationName, spawnId)
+	local locationTable = SpawnService.Active[locationName]
+	if not locationTable then return nil end
+
+	return locationTable[spawnId]
+end
+
+function SpawnService:ForceSpawn(locationName, plantName)
+	local location = LocationData[locationName]
+	if not location then return end
+	SpawnService.Active[locationName] = SpawnService.Active[locationName] or {}
+
+	local plantName = plantName
+
+	local plant = PlantInstance.new(plantName, locationName)
+	if plant then
+		local pos = randomPosition(location.SpawnArea, plant)
+		plant.Model:SetPrimaryPartCFrame(CFrame.new(pos))
+		SpawnService.Active[locationName][plant.Id] = plant
+	end
+end
+
+return SpawnService
