@@ -1,0 +1,215 @@
+local ServerScriptService = game:GetService("ServerScriptService")
+local HTTPService = game:GetService("HttpService")
+local TweenService = game:GetService("TweenService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local DataMGR = require(ServerScriptService.Data.DataHandler)
+local SessionHandler = require(ServerScriptService.Data.DataHandler.SessionHandler)
+local RemoteEvent = ReplicatedStorage.RemoteEvents
+local Resource = require(game.ServerStorage.Database.Resource)
+local AntiExploit = require(ServerScriptService.Game["Minigame Anti-Exploit"])
+
+local SpawnHandler = require(script.Parent)
+local PlantInstance = require(script.Parent.PlantInstance)
+
+SpawnHandler:InitializeAll()
+
+local FONT_FAMILY: Font = Font.new("rbxasset://fonts/families/Ubuntu.json")
+
+local RarityPrompt = {
+	Common = Resource.RarityColor.Common,
+	Uncommon = Resource.RarityColor.Uncommon,
+	Rare = Resource.RarityColor.Rare,
+	Legendary = Resource.RarityColor.Legendary,
+	Divine = Resource.RarityColor.Divine,
+	Transcendent = Resource.RarityColor.Transcendent,
+	Unknown = Resource.RarityColor.Unknown
+}
+
+local function CreateBillboard(boardtype, part, color, text)
+	
+	local BoardType = {
+		QuestionMark = {},
+		AbovePlant = {},
+	}
+	
+	local bbg = Instance.new("BillboardGui", part)
+	bbg.StudsOffset = Vector3.new(0,4,0)
+	bbg.Size = UDim2.new(0,200,0,100)
+	bbg.Enabled = true
+	bbg.MaxDistance = 100
+
+	local bbgT = Instance.new("TextLabel", bbg)
+	bbgT.BackgroundTransparency = 1
+	bbgT.FontFace = Font.new(FONT_FAMILY.Family, Enum.FontWeight.Bold, Enum.FontStyle.Normal)
+	bbgT.Size = UDim2.new(1,0,1,0)
+	bbgT.Text = text
+	bbgT.TextColor3 = color
+	bbgT.TextStrokeColor3 = Color3.new(0,0,0)
+	bbgT.TextStrokeTransparency = 1
+	bbgT.TextSize = 32
+	return bbg
+end
+
+ReplicatedStorage.RemoteEvents.MiniGame.StartForageMinigame.OnServerEvent:Connect(function(player, plantName, spawnId, location)
+	local plant = SpawnHandler:GetPlant(location, spawnId)
+	if not plant then warn("ERROR: Plant index unavailable.") return end
+	
+	local playerStats = DataMGR.Stats[player]
+	local part : BasePart = plant.Model.Main
+	local Character = player.Character or player.Character:Wait()
+	
+	-- Checking Player Sharpness & Capacity
+	if playerStats.Sharpness < plant.Data.Sharpness then
+		RemoteEvent.Notification:FireClient(player, plant.Data.Sharpness, "SharpnessLow") return
+	end
+	if player["Settings"]:GetAttribute("Capacity") >= player["Settings"]:GetAttribute("MaxCapacity") then
+		RemoteEvent.Notification:FireClient(player, player["Settings"]:GetAttribute("Capacity"), "Max Cap") return
+	end
+	
+	Character.Humanoid.WalkSpeed = 0
+	Character.Humanoid.JumpHeight = 0
+	
+	-- Main 
+	
+	if not part:GetAttribute("isAvailable") then
+		RemoteEvent.Notification:FireClient(player, plant.Name, "inProgress", part:GetAttribute("currentUser") or "Player")
+		return
+	end
+
+	if plant.Data.SpawnType == "Boss" then
+		if not part:FindFirstChild("BillboardGui") then
+			CreateBillboard(nil, part, Color3.new(0,0,0), "Only one can find the boss's treasure")
+		end
+	else
+		part:SetAttribute("isAvailable", false)
+		part:SetAttribute("currentUser", player.Name)
+		if not part:FindFirstChild("BillboardGui") then
+			CreateBillboard(nil, part, Color3.new(0,0,0), player.Name.." is observing")
+		end
+	end
+	
+	SessionHandler:CreateSession(player, plant)
+	
+	local selectedItem = plant:RollItem(player)
+	
+	table.sort(selectedItem, function(a, b)
+		local dataA = Resource[a.itemName]
+		local dataB = Resource[b.itemName]
+		return dataA.Chance < dataB.Chance
+	end)
+
+	SessionHandler:AddLoot(player, selectedItem)
+	print("Player Session", SessionHandler.Active[player])
+	local selectedBossItemFound = false
+
+	if plant.Data.SpawnType == "Boss" then
+		for k, v in ipairs(selectedItem) do
+			if v.itemName == plant.Data.BossItem then
+				local selectedBossItemFound = true
+				part:SetAttribute("isAvailable", false)
+
+				RemoteEvent.Notification:FireAllClients(plant.Data.BossItem, "BossWin", player.Name, plant.Name, nil )
+
+				part:FindFirstChild("BillboardGui").TextLabel.Text = player.Name.."Has Found the treasure"
+				part:SetAttribute("Winner", player.UserId)
+				part:SetAttribute("currentUser", player.Name)
+				break
+			end
+		end
+	end
+	
+	-- UI
+	local BillBoardG = CreateBillboard(nil, Character.HumanoidRootPart, RarityPrompt[Resource[selectedItem[1].itemName].Rarity], "?")
+	spawn(function()
+		wait(1)
+		local tween = TweenService:Create(BillBoardG.TextLabel, TweenInfo.new(1.5), {TextTransparency = 1, TextSize = 50})
+		tween:Play()
+		tween.Completed:Connect(function()
+			BillBoardG:Destroy()
+		end)
+	end)
+
+	print("Selected Item:", plant.Data.Rare and "(Shiny Gather)" or "(Default Gather)", selectedItem[1].itemName, "Quantity:", #selectedItem, selectedItem)
+
+	task.spawn(function()
+		task.wait(15*60)
+		if plant then
+			SpawnHandler:RemoveSpawn(plant)
+			SessionHandler:EndSession(player)
+		end
+	end)
+	RemoteEvent.MiniGame.StartForageMinigame:FireClient(player, DataMGR.Stats[player], selectedItem, Resource[selectedItem[1].itemName].Bar, Resource[selectedItem[1].itemName].Progress)
+	AntiExploit.CreateProfile(player, selectedItem, DataMGR.Stats[player], plant)
+end)
+
+RemoteEvent.MiniGame.FinishForageMinigame.OnServerEvent:Connect(function(player, success)
+	
+	local getSession = SessionHandler:GetSessionInfo(player)
+	
+	if not getSession then return player:Kick("Please rejoin, an error occured finding your data.") end
+	
+	local plant = getSession.Plant
+	local part = plant.Model.Main
+	local character = player.Character 
+	if not character then return end
+
+	local humanoid = character:FindFirstChild("Humanoid")
+	local hrp = character:FindFirstChild("HumanoidRootPart")
+	if not humanoid or not hrp then return end
+
+	player.Character.Humanoid.WalkSpeed = 16
+	player.Character.Humanoid.JumpHeight = 7.2
+
+	if not part and plant.Data.SpawnType ~= "Boss" then return end
+	
+	local function ProcessEnd()
+		if plant.Data.SpawnType == "Boss" then
+			if part and part:GetAttribute("Winner") == player.UserId then
+				SpawnHandler:RemoveSpawn(plant)
+				SessionHandler:EndSession(player)
+			else
+				SessionHandler:EndSession(player)
+			end
+		else
+			SpawnHandler:RemoveSpawn(plant)
+			SessionHandler:EndSession(player)
+		end
+		AntiExploit.activeGames[player] = nil
+		return
+	end
+	
+	if not success then
+		print("Not Success")
+		ProcessEnd()
+		return
+	end
+
+	-- check distance before giving reward
+
+	local distance = (hrp.Position - part.Position).Magnitude
+	if distance > (200) then
+		warn(player.Name .. " tried to finish minigame from too far!")
+		DataMGR.ExploitText(player, {"POSITION ERROR", distance, hrp.Position, part.Position})
+		ProcessEnd()
+		return
+	end
+
+	local HISTORY_LIMIT = 10
+
+	-- distance valid, give reward
+	local activeGame = AntiExploit.activeGames[player]
+	if activeGame and activeGame.Input > 0 then
+		local profile = DataMGR.Profiles[player]
+		local history = profile.Data.Player.MiniGameHistory
+		if #history > HISTORY_LIMIT then table.remove(history, 1) end
+		table.insert(history, activeGame)
+		DataMGR.RewardItem(player)
+	else
+		RemoteEvent.Notification:FireClient(player, "Exploit", "Exploit")
+		DataMGR.ExploitText(player, {"MG EXPLOIT ATTEMPTS", activeGame})
+	end
+
+	-- remove the spawn part
+	ProcessEnd()
+end)
